@@ -26,6 +26,7 @@ import java.sql.*;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static com.zaxxer.hikari.SQLExceptionOverride.Override.DO_NOT_EVICT;
 
@@ -46,6 +47,8 @@ public abstract class ProxyConnection implements Connection
    private static final Logger LOGGER;
    private static final Set<String> ERROR_STATES;
    private static final Set<Integer> ERROR_CODES;
+
+   private final ReentrantLock lock = new ReentrantLock();
 
    @SuppressWarnings("WeakerAccess")
    protected Connection delegate;
@@ -75,7 +78,7 @@ public abstract class ProxyConnection implements Connection
       ERROR_STATES.add("57P03"); // CANNOT CONNECT NOW
       ERROR_STATES.add("01002"); // SQL92 disconnect error
       ERROR_STATES.add("JZ0C0"); // Sybase disconnect error
-      ERROR_STATES.add("JZ0C1"); // Sybase disconnect error
+      ERROR_STATES.add("JZ0C1"); // S000ybase disconnect error
 
       ERROR_CODES = new HashSet<>();
       ERROR_CODES.add(500150);
@@ -184,9 +187,13 @@ public abstract class ProxyConnection implements Connection
       return sqle;
    }
 
-   final synchronized void untrackStatement(final Statement statement)
-   {
-      openStatements.remove(statement);
+   final  void untrackStatement(final Statement statement) {
+      lock.lock();
+      try {
+         openStatements.remove(statement);
+      } finally {
+         lock.unlock();
+      }
    }
 
    final void markCommitStateDirty()
@@ -201,32 +208,40 @@ public abstract class ProxyConnection implements Connection
       leakTask.cancel();
    }
 
-   private synchronized <T extends Statement> T trackStatement(final T statement)
-   {
-      openStatements.add(statement);
+   private <T extends Statement> T trackStatement(final T statement) {
+      lock.lock();
+      try {
+         openStatements.add(statement);
+      } finally {
+         lock.unlock();
+      }
 
       return statement;
    }
 
    @SuppressWarnings("EmptyTryBlock")
-   private synchronized void closeStatements()
-   {
-      final var size = openStatements.size();
-      if (size > 0) {
-         for (int i = 0; i < size && delegate != ClosedConnection.CLOSED_CONNECTION; i++) {
-            try (Statement ignored = openStatements.get(i)) {
-               // automatic resource cleanup
+   private void closeStatements(){
+      lock.lock();
+      try {
+         final var size = openStatements.size();
+         if (size > 0) {
+            for (int i = 0; i < size && delegate != ClosedConnection.CLOSED_CONNECTION; i++) {
+               try (Statement ignored = openStatements.get(i)) {
+                  // automatic resource cleanup
+               }
+               catch (SQLException e) {
+                  LOGGER.warn("{} - Connection {} marked as broken because of an exception closing open statements during Connection.close()",
+                     poolEntry.getPoolName(), delegate);
+                  leakTask.cancel();
+                  poolEntry.evict("(exception closing Statements during Connection.close())");
+                  delegate = ClosedConnection.CLOSED_CONNECTION;
+               }
             }
-            catch (SQLException e) {
-               LOGGER.warn("{} - Connection {} marked as broken because of an exception closing open statements during Connection.close()",
-                           poolEntry.getPoolName(), delegate);
-               leakTask.cancel();
-               poolEntry.evict("(exception closing Statements during Connection.close())");
-               delegate = ClosedConnection.CLOSED_CONNECTION;
-            }
-         }
 
-         openStatements.clear();
+            openStatements.clear();
+         }
+      } finally {
+         lock.unlock();
       }
    }
 

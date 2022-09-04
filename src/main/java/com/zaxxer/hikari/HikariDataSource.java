@@ -29,6 +29,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static com.zaxxer.hikari.pool.HikariPool.POOL_NORMAL;
 
@@ -42,6 +43,7 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
    private static final Logger LOGGER = LoggerFactory.getLogger(HikariDataSource.class);
 
    private final AtomicBoolean isShutdown = new AtomicBoolean();
+   private final ReentrantLock lock = new ReentrantLock();
 
    private final HikariPool fastPathPool;
    private volatile HikariPool pool;
@@ -103,7 +105,8 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
       // See http://en.wikipedia.org/wiki/Double-checked_locking#Usage_in_Java
       HikariPool result = pool;
       if (result == null) {
-         synchronized (this) {
+         lock.lock();
+         try {
             result = pool;
             if (result == null) {
                validate();
@@ -122,6 +125,8 @@ public class HikariDataSource extends HikariConfig implements DataSource, Closea
                }
                LOGGER.info("{} - Start completed.", getPoolName());
             }
+         } finally {
+            lock.unlock();
          }
       }
 
